@@ -1,157 +1,45 @@
-Ledger
+Read-Write set semantics
 
-  The ledger is the sequenced, tamper-resistant record of all state transitions.
-  State transitions are a result of chaincode invocations (transactions) that
-  are submitted by participating parties. Each transaction results in a set of
-  asset key-value pairs that are commited to the ledger as creates, updates,
-  or deletes.
+  This documents discusses the details of the current implementation about the semantics of
+  read-write sets.
 
-  The ledger is comprised of a blockchain to store the immutable, sequenced
-  record in blocks, as well as a state database to maintain current state.
-  There is only one ledger per channel. Each peer maintains a copy of the ledger
-  for each channel of which they are a member.
+  Transaction simulation and read-write set
 
-  Chain
+    During simulation of a transaction at an endorser, a read-write set is prepared for the
+    transaction.
 
-    The chain is a transaction log, structured as hash-linked blocks, where each
-    block contains a sequence of N transactions. The block header includes a hash
-    of the block's transactions, as well as a hash of the prior block's header.
-    In this way, all transactions on the ledger are sequenced and cryptographically
-    linked together.
+    The read set contains a list of unique keys and their committed versions that the
+    transaction reads during simulation. The write set contains a list of unique keys
+    (though there can be overlap with the keys present in the read set) and their new values
+    that the transaction writes.
 
-    It other words, its not possible ot tamper with the ledger data, without breaking
-    the hash links. The hash of the latest block represents every transaction that has
-    come before, making it possible to ensure that all peers are in a consistent
-    and trusted state.
+    A delete marker is set (in the place of new value) for the key if the update performed by
+    the transaction is to delete the key.
 
-  State Database
+    Further, if the transaction writes a value multiple times for a key, only the last written
+    value is retained. Also, if a transaction reads a value for a key, the value in the
+    committed state is returned even if the transaction has updated the value for the key
+    before issuing the read. In another words, Read-your-writes semantics are not supported.
 
-    The ledger's current state data represents the latest values for all keys ever
-    included in the chain transaction log. Since current state represents all latest
-    key values known to the channel, it is sometimes referred to as World State.
+    As noted earlier, the versions of the keys are recorded only in the read set; the write
+    set just contains the list of unique keys and their latest values set by the transaction.
 
-    Chaincode invocations execute transactions against the current state data. To make
-    these chaincode interactions extremely efficient, the latest values of all keys are
-    stored in a state database.
+    Additionally, if the transaction performs a range query during simulation, the range query
+    as well as its results will be added to the read-write set as query-info.
 
-    The state database is simply an indexed view into the chain's transaction log. It
-    can therefore be regenerated from the chain at any time. The state database will
-    automatically get recovered upon peer startup, before transactions are accepted.
+  Transaction validation and updating world state using read-write set
 
-  Transaction Flow
+    A committer uses the read set portion of the read-write set for checking the validity of a
+    transaction and the write set portion of the read-write set for updating the versions
+    and the values of the affected keys.
 
-    At a high level, the transaction flow consists of a transaction proposal sent by an
-    application client to specific endorsing peers. The endorsing peers verify the
-    client signature, and execute a chaincode function to simulate the transaction.
+    In the validation phase, a transaction is considered valid if the version of each key
+    present in the read set of the transaction matches the version for the same key in the
+    world state - assuming all the preceding valid transactions (including the preceding
+    transactions in the same block) are committed (committed-state).
 
-    The output is the chaincode results, a set of key/value versions that were read in
-    the chaincode (read set), and the set of keys/values that were written in chaincode
-    (write set). The proposal response gets sent back to the client along with an
-    endorsement signature.
-
-    The client assembles the endorsements into a transaction payload and broadcasts it
-    to an ordering service. The ordering service delivers ordered transactions as blocks
-    to all peers on a channel.
-
-    Before committal, peers will validate the transactions. First, they will check the
-    endorsement policy to ensure that the correct allotment of the specified peers
-    have signed the results, and they will authenticate the signatures against the
-    transaction payload.
-
-    Secondly, peers will perform a versioning check against the transaction read set,
-    to ensure data integrity and protect against threats such as double-spending.
-
-    Hyperledger Fabric has concurrency control whereby transactions execute in parallel
-    (by endorsers) to increase throughput, and upon commit (by all peers) each
-    transaction is verified to ensure that no other transaction has modified data it has
-    read. In other words, it ensures that the data that was read during chaincode
-    execution has not changed since execution (endorsement) time, and therefore the
-    execution results are still valid and can be committed to the ledger state database.
-
-    If the data that was read has been changed by another transaction, then the
-    transaction in the block is marked as invalid and is not applied to the ledger state
-    database. The client application is alerted, and can handle the error or retry as
-    appropriate.
-
-  State Database options
-
-    State database options include LevelDB and CouchDB. LevelDB is the default key/value
-    state database embedded in the peer process. CouchDB is an optional alternative
-    external state database. Like the LevelDB key/value store, CouchDB can store any
-    binary data that is modeled in chaincode (CouchDB attachment functionality is used
-    internally for non-JSON binary data). But as a JSON document store, CouchDB
-    additionally enables rich query against the chaincode data, when chaincode values
-    (e.g. assets) are modeled as JSON data.
-
-    If you model assets as JSON and use CouchDB, you can also perform complex rich
-    queries against the chaincode data values, using the CouchDB JSON query language
-    within chaincode. These types of queries are excellent for understanding what is
-    on the ledger.
-
-    Proposal responses for these types of queries are typically useful
-    to the client application, but are not typically submitted as transactions to the
-    ordering service. In fact, there is no guarantee the result set is stable between
-    chaincode execution and commit time for rich queries, and therefore rich queries
-    are not appropriate for use in update transactions .
-
-    For example, if you perform a rich query for all assets owned by Alice and transfer
-    them to Bob, a new asset may be assigned to Alice by another transaction between
-    chaincode execution time and commit time, and you would miss this ‘phantom’ item.
-
-    CouchDB runs as a separate database process alongside the peer, therefore there are
-    additional considerations in terms of setup, management, and operations. You may
-    consider starting with the default embedded LevelDB, and move to CouchDB if you require
-    the additional complex rich queries. It is a good practice to model chaincode asset
-    data as JSON, so that you have the option to perform complex rich queries if needed
-    in the future.
-
-  CouchDB Configuration
-
-    CouchDB is enabled as the state database by changing the stateDatabase configuration
-    option from goleveldb to CouchDB. Additionally, the couchDBAddress needs to configured
-    to point to the CouchDB to be used by the peer.
-
-    The username and password properties should be populated with an admin username and
-    password if CouchDB is configured with a username and password.
-
-    Additional options are provided in the couchDBConfig section and are documented in place.
-
-    Changes to the core.yaml will be effective immediately after restarting the peer.
-
-    You can also pass in docker environment variables to override core.yaml values, for
-    example CORE_LEDGER_STATE_STATEDATABASE and CORE_LEDGER_STATE_COUCHDBCONFIG_COUCHDBADDRESS.
-
-    Below is the stateDatabase section from core.yaml:
-      state:
-        # stateDatabase - options are "goleveldb", "CouchDB"
-        # goleveldb - default state database stored in goleveldb.
-        # CouchDB - store state database in CouchDB
-        stateDatabase: goleveldb
-        couchDBConfig:
-           # It is recommended to run CouchDB on the same server as the peer, and
-           # not map the CouchDB container port to a server port in docker-compose.
-           # Otherwise proper security must be provided on the connection between
-           # CouchDB client (on the peer) and server.
-           couchDBAddress: couchdb:5984
-           # This username must have read and write authority on CouchDB
-           username:
-           # The password is recommended to pass as an environment variable
-           # during start up (e.g. LEDGER_COUCHDBCONFIG_PASSWORD).
-           # If it is stored here, the file must be access control protected
-           # to prevent unintended users from discovering the password.
-           password:
-           # Number of retries for CouchDB errors
-           maxRetries: 3
-           # Number of retries for CouchDB errors during peer startup
-           maxRetriesOnStartup: 10
-           # CouchDB request timeout (unit: duration, e.g. 20s)
-           requestTimeout: 35s
-           # Limit on the number of records to return per query
-           queryLimit: 10000
-
-      CouchDB hosted in docker containers supplied with Hyperledger Fabric have the capability of
-      setting the CouchDB username and password with environment variables passed in with the
-      COUCHDB_USER and COUCHDB_PASSWORD environment variables using Docker Compose scripting.
-
-
+    If a transaction passes the validity check, the committer uses the write set for updating
+    the world state. In the update phase, for each key present in the write set, the value in
+    the world state for the same key is set to the value as specified in the write set. Further,
+    the version of the key in the world state is changed to reflect the latest version.
 
