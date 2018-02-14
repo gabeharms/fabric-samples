@@ -1,0 +1,172 @@
+Basic workflow of transaction endorsement
+  In the following we outline the high-level request flow for a transaction.
+
+  2.1. The client creates a transaction and sends it to endorsing peers of its choice
+    To invoke a transaction, the client sends a PROPOSE message to a set of endorsing peers of its
+    choice. The set of endorsing peers for a given chaincodeID is made available to client via peer,
+    which in turn knows the set of endorsing peers from endorsement policy.
+
+    For example, the transaction could be sent to all endorsers of a given chaincodeID. That said,
+    some endorsers could be offline, others may object and choose not to endorse the transaction.
+    The submitting client tries to satisfy the policy expression with the endorsers available.
+
+    In the following, we first detail PROPOSE message format and then discuss possible patterns of
+    interaction between submitting client and endorsers.
+
+    2.1.1. PROPOSE message format
+      The format of a PROPOSE message is <PROPOSE,tx,[anchor]>, where tx is a mandatory and anchor optional argument explained in the following.
+
+      tx=<clientID,chaincodeID,txPayload,timestamp,clientSig>, where
+        'clientID' is an ID of the submitting client,
+        'chaincodeID' refers to the chaincode to which the transaction pertains,
+        'txPayload' is the payload containing the submitted transaction itself,
+        'timestamp' is a monotonically increasing (for every new transaction) integer maintained by the client,
+        'clientSig' is signature of a client on other fields of tx.
+
+        The details of txPayload will differ between invoke transactions and deploy transactions
+        (i.e., invoke transactions referring to a deploy-specific system chaincode). For an invoke
+        transaction, txPayload would consist of two fields:
+
+          txPayload = <operation, metadata>, where
+            'operation' denotes the chaincode operation (function) and arguments,
+            'metadata' denotes attributes related to the invocation.
+
+        For a deploy transaction, txPayload would consist of three fields
+
+          txPayload = <source, metadata, policies>, where
+            'source' denotes the source code of the chaincode,
+            'metadata' denotes attributes related to the chaincode and application,
+            'policies' contains policies related to the chaincode that are accessible to all peers,
+              such as the endorsement policy. Note that endorsement policies are not supplied with
+              txPayload in a deploy transaction, but txPayload of a deploy contains endorsement
+              policy ID and its parameters.
+
+        'anchor' contains read version dependencies, or more specifically, key-version pairs, that
+          binds or “anchors” the PROPOSE request to specified versions of keys in a KVS. If the client
+          specifies the anchor argument, an endorser endorses a transaction only upon read version
+          numbers of corresponding keys in its local KVS match anchor.
+
+      Cryptographic hash of tx is used by all nodes as a unique transaction identifier tid
+      (i.e., tid=HASH(tx)). The client stores tid in memory and waits for responses from endorsing
+      peers.
+
+    2.1.2. Message patterns
+      The client decides on the sequence of interaction with endorsers. For example, a client would
+      typically send <PROPOSE, tx> (i.e., without the anchor argument) to a single endorser, which
+      would then produce the version dependencies (anchor) which the client can later on use as an
+      argument of its PROPOSE message to other endorsers.
+
+      As another example, the client could directly send <PROPOSE, tx> (without anchor) to all
+      endorsers of its choice. Different patterns of communication are possible and client is free
+      to decide on those.
+
+  2.2. The endorsing peer simulates a transaction and produces an endorsement signature
+    On reception of a <PROPOSE,tx,[anchor]> message from a client, the endorsing peer epID first
+    verifies the client’s signature clientSig and then simulates a transaction.
+
+    If the client specifies anchor then endorsing peer simulates the transactions only upon read
+    version numbers of corresponding keys in its local KVS match those version numbers specified by
+    anchor.
+
+    Simulating a transaction involves endorsing peer tentatively executing a transaction (txPayload),
+    by invoking the chaincode to which the transaction refers (chaincodeID) and the copy of the
+    state that the endorsing peer locally holds.
+
+    As a result of the execution, the endorsing peer computes read version dependencies (readset)
+    and state updates (writeset), also called MVCC+postimage info in DB language.
+
+    Recall that the state consists of key/value (k/v) pairs. All k/v entries are versioned, that is,
+    every entry contains ordered version information, which is incremented every time when the
+    value stored under a key is updated. The peer that interprets the transaction records all k/v
+    pairs accessed by the chaincode, either for reading or for writing, but the peer does not yet
+    update its state. More specifically:
+
+      Given state s before an endorsing peer executes a transaction, for every key k read by the
+      transaction, pair (k,s(k).version) is added to readset.
+
+      Additionally, for every key k modified by the transaction to the new value v', pair (k,v')
+      is added to writeset. Alternatively, v' could be the delta of the new value to previous
+      value (s(k).value).
+
+    If a client specifies anchor in the PROPOSE message then client specified anchor must equal
+    readset produced by endorsing peer when simulating the transaction.
+
+    Then, the peer forwards internally tran-proposal (and possibly tx) to the part of its (peer’s)
+    logic that endorses a transaction, referred to as endorsing logic. By default, endorsing logic
+    at a peer accepts the tran-proposal and simply signs the tran-proposal. However, endorsing logic may
+    interpret arbitrary functionality to reach the decision whether to endorse a transaction or not.
+
+    If endorsing logic decides to endorse a transaction, it sends
+      <TRANSACTION-ENDORSED, tid, tran-proposal,epSig>
+    message to the submitting client(tx.clientID), where:
+
+      'tran-proposal' := (epID,tid,chaincodeID,txContentBlob,readset,writeset), where
+        'txContentBlob' is chaincode/transaction specific information. The intention is to have
+          txContentBlob used as some representation of tx (e.g., txContentBlob=tx.txPayload).
+      'epSig' is the endorsing peer’s signature on tran-proposal
+
+    Else, in case the endorsing logic refuses to endorse the transaction, an endorser may send a
+    message (TRANSACTION-INVALID, tid, REJECTED) to the submitting client.
+
+    Notice that an endorser does not change its state in this step, the updates produced by
+    transaction simulation in the context of endorsement do not affect the state!
+
+  2.3. The submitting client collects an endorsement for a transaction and broadcasts it through ordering service
+    The submitting client waits until it receives “enough” messages and signatures on
+    (TRANSACTION-ENDORSED, tid, *, *) statements to conclude that the transaction proposal is
+    endorsed. This may involve one or more round-trips of interaction with endorsers.
+
+    The exact number of “enough” depend on the chaincode endorsement policy. If the endorsement
+    policy is satisfied, the transaction has been endorsed; note that it is not yet committed.
+
+    The collection of signed TRANSACTION-ENDORSED messages from endorsing peers which establish that
+    a transaction is endorsed is called an endorsement and denoted by endorsement.
+
+    If the submitting client does not manage to collect an endorsement for a transaction proposal,
+    it abandons this transaction with an option to retry later.
+
+    For transaction with a valid endorsement, we now start using the ordering service. The
+    submitting client invokes ordering service using the broadcast(blob), where blob=endorsement.
+
+    If the client does not have capability of invoking ordering service directly, it may proxy its
+    broadcast through some peer of its choice. Such a peer must be trusted by the client not to
+    remove any message from the endorsement or otherwise the transaction may be deemed invalid.
+    Notice that, however, a proxy peer may not fabricate a valid endorsement.
+
+  2.4. The ordering service delivers a transactions to the peers
+    When an event deliver(seqno, prevhash, blob) occurs and a peer has applied all state updates
+    for blobs with sequence number lower than seqno, a peer does the following:
+
+      It checks that the blob.endorsement is valid according to the policy of the chaincode
+        (blob.tran-proposal.chaincodeID) to which it refers.
+      In a typical case, it also verifies that the dependencies
+        (blob.endorsement.tran-proposal.readset) have not been violated meanwhile. In more complex
+        use cases, tran-proposal fields in endorsement may differ and in this case endorsement
+        policy specifies how the state evolves.
+
+    Verification of dependencies can be implemented in different ways, according to a consistency
+    property or “isolation guarantee” that is chosen for the state updates. Serializability is a
+    default isolation guarantee, unless chaincode endorsement policy specifies a different one.
+
+    Serializability can be provided by requiring the version associated with every key in the
+    readset to be equal to that key’s version in the state, and rejecting transactions that do not
+    satisfy this requirement.
+
+    If all these checks pass, the transaction is deemed valid or committed. In this case, the peer
+    marks the transaction with 1 in the bitmask of the PeerLedger, applies
+    blob.endorsement.tran-proposal.writeset to blockchain state.
+
+    If the endorsement policy verification of blob.endorsement fails, the transaction is invalid
+    and the peer marks the transaction with 0 in the bitmask of the PeerLedger. It is important to
+    note that invalid transactions do not change the state.
+
+    Note that this is sufficient to have all (correct) peers have the same state after processing
+    a deliver event (block) with a given sequence number. Namely, by the guarantees of the ordering
+    service, all correct peers will receive an identical sequence of deliver(seqno, prevhash, blob)
+    events.
+
+    As the evaluation of the endorsement policy and evaluation of version dependencies in
+    readset are deterministic, all correct peers will also come to the same conclusion whether a
+    transaction contained in a blob is valid. Hence, all peers commit and apply the same sequence of
+    transactions and update their state in the same way.
+
