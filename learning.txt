@@ -1,45 +1,61 @@
-Read-Write set semantics
+Gossip data dissemination protocol
 
-  This documents discusses the details of the current implementation about the semantics of
-  read-write sets.
+  Hyperledger Fabric optimizes blockchain network performance, security and scalability by dividing 
+  workload across transaction execution (endorsing and committing) peers and transaction ordering nodes. 
 
-  Transaction simulation and read-write set
+  This decoupling of network operations requires a secure, reliable and scalable data dissemination 
+  protocol to ensure data integrity and consistency.
 
-    During simulation of a transaction at an endorser, a read-write set is prepared for the
-    transaction.
+  Gossip protocol
+    Peers leverage gossip to broadcast ledger and channel data in a scalable fashion. Gossip messaging 
+    is continuous, and each peer on a channel is constantly receiving current and consistent ledger data,
+    from multiple peers. 
+    
+    Each gossiped message is signed, thereby allowing Byzantine participants sending faked messages to 
+    be easily identified and the distribution of the message(s) to unwanted targets to be prevented. 
+    
+    Peers affected by delays, network partitions or other causations resulting in missed blocks, will 
+    eventually be synced up to the current ledger state by contacting peers in possession of these 
+    missing blocks.
 
-    The read set contains a list of unique keys and their committed versions that the
-    transaction reads during simulation. The write set contains a list of unique keys
-    (though there can be overlap with the keys present in the read set) and their new values
-    that the transaction writes.
+    The gossip-based data dissemination protocol performs three primary functions on a Hyperledger 
+    Fabric network:
+      1. Manages peer discovery and channel membership, by continually identifying available member peers,
+          and eventually detecting peers that have gone offline.
+      2. Disseminates ledger data across all peers on a channel. Any peer with data that is out of sync 
+          with the rest of the channel identifies the missing blocks and syncs itself by copying the 
+          correct data.
+      3. Bring newly connected peers up to speed by allowing peer-to-peer state transfer update of 
+          ledger data.
 
-    A delete marker is set (in the place of new value) for the key if the update performed by
-    the transaction is to delete the key.
+    Gossip-based broadcasting operates by peers receiving messages from other peers on the channel, and 
+    then forwarding these messages to a number of randomly-selected peers on the channel, where this 
+    number is a configurable constant. 
+    
+    Peers can also exercise a pull mechanism, rather than waiting for delivery of a message. This cycle 
+    repeats, with the result of channel membership, ledger and state information continually being kept
+    current and in sync. 
+    
+    For dissemination of new blocks, the leader peer on the channel pulls the data from the ordering 
+    service and initiates gossip dissemination to peers.
 
-    Further, if the transaction writes a value multiple times for a key, only the last written
-    value is retained. Also, if a transaction reads a value for a key, the value in the
-    committed state is returned even if the transaction has updated the value for the key
-    before issuing the read. In another words, Read-your-writes semantics are not supported.
+  Gossip messaging
 
-    As noted earlier, the versions of the keys are recorded only in the read set; the write
-    set just contains the list of unique keys and their latest values set by the transaction.
+    Online peers indicate their availability by continually broadcasting “alive” messages, with each 
+    containing the public key infrastructure (PKI) ID and the signature of the sender over the message. 
 
-    Additionally, if the transaction performs a range query during simulation, the range query
-    as well as its results will be added to the read-write set as query-info.
+    Peers maintain channel membership by collecting these alive messages; if no peer receives an alive
+    message from a specific peer, this “dead” peer is eventually purged from channel membership. Because
+    “alive” messages are cryptographically signed, malicious peers can never impersonate other peers, 
+    as they lack a signing key authorized by a root certificate authority (CA).
 
-  Transaction validation and updating world state using read-write set
+    In addition to the automatic forwarding of received messages, a state reconciliation process 
+    synchronizes world state across peers on each channel. Each peer continually pulls blocks from other
+    peers on the channel, in order to repair its own state if discrepancies are identified. Because 
+    fixed connectivity is not required to maintain gossip-based data dissemination, the process reliably
+    provides data consistency and integrity to the shared ledger, including tolerance for node crashes.
 
-    A committer uses the read set portion of the read-write set for checking the validity of a
-    transaction and the write set portion of the read-write set for updating the versions
-    and the values of the affected keys.
-
-    In the validation phase, a transaction is considered valid if the version of each key
-    present in the read set of the transaction matches the version for the same key in the
-    world state - assuming all the preceding valid transactions (including the preceding
-    transactions in the same block) are committed (committed-state).
-
-    If a transaction passes the validity check, the committer uses the write set for updating
-    the world state. In the update phase, for each key present in the write set, the value in
-    the world state for the same key is set to the value as specified in the write set. Further,
-    the version of the key in the world state is changed to reflect the latest version.
-
+    Because channels are segregated, peers on one channel cannot message or share information on any other
+    channel. Though any peer can belong to multiple channels, partitioned messaging prevents blocks from
+    being disseminated to peers that are not in the channel by applying message routing policies based
+    on peers’ channel subscriptions.
