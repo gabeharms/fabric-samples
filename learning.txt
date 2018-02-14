@@ -1,160 +1,102 @@
-Endorsement Policies
+Transaction Flow
 
-  3.1. Endorsement policy specification
-    An endorsement policy, is a condition on what endorses a transaction. Blockchain peers have a
-    pre-specified set of endorsement policies, which are referenced by a deploy transaction that
-    installs specific chaincode. Endorsement policies can be parametrized, and these parameters can
-    be specified by a deploy transaction.
+  This document outlines the transactional mechanics that take place during standard asset
+  exchange. The scenario includes two clients, A and B, who are buying and selling
+  radishes. They eadch have a peer on the network through which they send their transactions
+  and interact with the ledger.
 
-    To guarantee blockchain and security properties, the set of endorsement policies should be a
-    set of proven policies with limited set of functions in order to ensure bounded execution
-    time (termination), determinism, performance and security guarantees.
+  Assumptions
+    This flow assumes that a channel is set up and running. The application user has registered
+    and enrolled with the organization's certificate authority (CA) and received back necessary
+    cryptographical material, which is used to authenticate to the network.
 
-    Dynamic addition of endorsement policies (e.g., by deploy transaction on chaincode deploy time)
-    is very sensitive in terms of bounded policy evaluation time (termination), determinism,
-    performance and security guarantees. Therefore, dynamic addition of endorsement policies is not
-    allowed, but can be supported in future.
+    The chaincode (containing a set of key value paris representing the initial state of the
+    radish market) is installed on the peers and instantiated on the channel. The chaincode
+    contains logic defining a set of transaction instructions and the agreed upon price for a
+    radish. An endorsement policy has also been set for this chaincode, stating that both peerA
+    and peerB must endorse any transaction.
 
-  3.2. Transaction evaluation against endorsement policy
-    A transaction is declared valid only if it has been endorsed according to the policy. An invoke
-    transaction for a chaincode will first have to obtain an endorsement that satisfies the
-    chaincode’s policy or it will not be committed. This takes place through the interaction between
-    the submitting client and endorsing peers.
+  1. Client A initiates a transaction
+    What's happening? - Client A is sending a request to purchase radishes. The request targets
+    peerA and peerB, who are respectively representitive of Client A and Client B. The endorsement
+    policy states that peers must endorse any transaction, therefore the request goes to peerA
+    and peerB.
 
-    Formally the endorsement policy is a predicate on the endorsement, and potentially further state
-    that evaluates to TRUE or FALSE. For deploy transactions the endorsement is obtained according
-    to a system-wide policy (for example, from the system chaincode).
+    Next, the transaction proposal is constructed. An application leveraging a supported SDK utilizes
+    one of the available API's which generates a transaction proposal. The proposal is a request to
+    invoke a chaincode function so that data can be read and/or written to the ledger (i.e. write
+    new key value pairs for the assets).
 
-    An endorsement policy predicate refers to certain variables. Potentially it may refer to:
-      1. keys or identities relating to the chaincode (found in the metadata of the chaincode),
-          for example, a set of endorsers
-      2. further metadata of the chaincode
-      3. elements of the endorsement and endorsement.tran-proposal
-      4. and potentially more
+    The SDK serves as a shim to package the transaction proposal into the properly architected
+    format and takes the user's cryptographic credentials to produce a unique signature for this
+    transaction proposal.
 
-    The above list is ordered by increasing expressiveness and complexity, that is, it will be
-    relatively simple to support policies that only refer to keys and identities of nodes.
+  2. Endorsing peers verify signature & execute the transaction
+    The endorsing peers verify (1) that the transaction proposal is well formed, (2) it has not
+    been submitted already in the past (replay-attack protection), (3) the signature is valid (
+    using MSP), and (4) that the submitter (Client A, in this example) is properly authorized to
+    perform the proposed operation on that channel (namely, each endorsing peer ensures that the
+    submitter satisfies the channel's Writers policy).
 
-    The evaluation of an endorsement policy predicate must be deterministic. An endorsement shall
-    be evaluated locally by every peer such that a peer does not need to interact with other peers,
-    yet all correct peers evaluate the endorsement policy in the same way.
+    The endorsing peers take the transaction proposal inputs as arguments to the invoked chaincode's
+    function. The chaincode is then executed against the current state database to produce
+    transaction results including a response value, read set, and write set.
 
-  3.3. Example endorsement policies
-    The predicate may contain logical expressions and evaluates to TRUE or FALSE. Typically the
-    condition will use digital signatures on the transaction invocation issued by endorsing peers
-    for the chaincode.
+    No updates are made to the ledger at this point. The set of these values, along with the
+    endorsing peer's signature is passed back as a "proposal response" to the SDK which parses the
+    payload for the application to consume.
 
-    Suppose the chaincode specifies the endorser set
-      E = {Alice, Bob, Charlie, Dave, Eve, Frank, George}
-    Some example policies:
-      - A valid signature from on the same tran-proposal from all members of E.
-      - A valid signature from any single member of E.
-      - Valid signatures on the same tran-proposal from endorsing peers according to the condition
-          (Alice OR Bob) AND (any two of: Charlie, Dave, Eve, Frank, George).
-      - Valid signatures on the same tran-proposal by any 5 out of the 7 endorsers.
-      - Suppose there is an assignment of “stake” or “weights” to the endorsers, like
-          {Alice=49, Bob=15, Charlie=15, Dave=10, Eve=7, Frank=3, George=1}, where the total stake
-          is 100: The policy requires valid signatures from a set that has a majority of the stake
-          (i.e., a group with combined stake strictly more than 50), such as {Alice, X} with any X
-          different from George, or {everyone together except Alice}. And so on.
-      - The assignment of stake in the previous example condition could be static (fixed in the
-          metadata of the chaincode) or dynamic (e.g., dependent on the state of the chaincode and
-          be modified during the execution).
-      - Valid signatures from (Alice OR Bob) on tran-proposal1 and valid signatures from (any two
-          of: Charlie, Dave, Eve, Frank, George) on tran-proposal2, where tran-proposal1 and
-          tran-proposal2 differ only in their endorsing peers and state updates.
+    { The MSP is a peer component that allows them to verify transaction requests arriving from
+      clients and to sign transaction results(endorsements). The Writing policy is defined at
+      channel creation time, and determines which user is entitled to submit a transaction to that
+      channel. }
 
-    How useful these policies are will depend on the application, on the desired resilience of the
-    solution against failures or misbehavior of endorsers, and on various other properties.
+  3. Proposal responses are inspected
+    The application verifies the endorsing peer signatures and compares the proposal responses to
+    determine if the proposal responses are the same.
+
+    If the chaincode only queries the ledger, the application would inspect the query response and
+    would typically not submit the transaction to the Ordering service.
+
+    If the client application intends to submit the transaction to the Ordering service to update
+    the ledger, the application determines if the specified endorsement policy has been fulfilled
+    before submitting (i.e. did peerA and peerB both endorse). The architecture is such that even
+    if an application chooses not to inspect responses or otherwise forwards an unendorsed
+    transaction, the endorsement policy will still be enforced by peers and upheld at the commit
+    validation phase.
+
+  4. Client assembles endorsements into a transaction
+    The application "broadcasts" the transaction proposal and response within a "transaction message"
+    to the Ordering service. The transaction will contain the read/write sets, the endorsing peers
+    signatures and the channel ID.
+
+    The Ordering service does not need to inspect the entire content of a transaction in order to
+    perfrom its operation, it simply receives transactions from all channels in the network, orders
+    them chronologically by channel, and creates blocks of transactions per channel.
+
+  5. Transaction is validated and commited
+    The blocks of transactions are "delivered" to all peers on the channel. The transactions within
+    the block are validated to ensure endorsement policy is fulfilled and to ensure that there have
+    been no changes to ledger state for read set variables since the read set was generated by the
+    transaction execution. Transactions in the block are tagged as being valid or invalid.
+
+  6. Ledger updated
+    Each peer appends the block to the channel's chain, and for each valid transaction the write
+    sets are commited to the current state database. An event is emitted, to notify the client
+    application that the transaction (invocation) has been immutably appended to the chain, as well
+    a notification of whether the transaction was validated or invalidated.
 
 
-Validated ledger and PeerLedger checkpointing (pruning)
 
-  4.1. Validated ledger (VLedger)
-    To maintain the abstraction of a ledger that contains only valid and committed transactions
-    (that appears in Bitcoin, for example), peers may, in addition to state and Ledger, maintain the
-    Validated Ledger (or VLedger). This is a hash chain derived from the ledger by filtering out
-    invalid transactions.
 
-    The construction of the VLedger blocks (called here vBlocks) proceeds as follows. As the
-    PeerLedger blocks may contain invalid transactions (i.e., transactions with invalid endorsement
-    or with invalid version dependencies), such transactions are filtered out by peers before a
-    transaction from a block becomes added to a vBlock. Every peer does this by itself (e.g., by
-    using the bitmask associated with PeerLedger). A vBlock is defined as a block without the
-    invalid transactions, that have been filtered out. Such vBlocks are inherently dynamic in size
-    and may be empty.
 
-    vBlocks are chained together to a hash chain by every peer. More specifically, every block of a
-    validated ledger contains:
-      - The hash of the previous vBlock.
-      - vBlock number.
-      - An ordered list of all valid transactions committed by the peers since the last vBlock was
-          computed (i.e., list of valid transactions in a corresponding block).
-      - The hash of the corresponding block (in PeerLedger) from which the current vBlock is derived.
 
-    All this information is concatenated and hashed by a peer, producing the hash of the vBlock in
-    the validated ledger.
 
-  4.2. PeerLedger Checkpointing
-    The ledger contains invalid transactions, which may not necessarily be recorded forever.
-    However, peers cannot simply discard PeerLedger blocks and thereby prune PeerLedger once they
-    establish the corresponding vBlocks. Namely, in this case, if a new peer joins the network,
-    other peers could not transfer the discarded blocks (pertaining to PeerLedger) to the joining
-    peer, nor convince the joining peer of the validity of their vBlocks.
 
-    To facilitate pruning of the PeerLedger, this document describes a checkpointing mechanism. This
-    mechanism establishes the validity of the vBlocks across the peer network and allows
-    checkpointed vBlocks to replace the discarded PeerLedger blocks. This, in turn, reduces storage
-    space, as there is no need to store invalid transactions.
 
-    It also reduces the work to reconstruct the state for new peers that join the network (as they
-    do not need to establish validity of individual transactions when reconstructing the state by
-    replaying PeerLedger, but may simply replay the state updates contained in the validated
-    ledger).
 
-    4.2.1. Checkpointing protocol
-      Checkpointing is performed periodically by the peers every CHK blocks, where CHK is a
-      configurable parameter. To initiate a checkpoint, the peers broadcast (e.g., gossip) to other
-      peers message
-        <CHECKPOINT,blocknohash,blockno,stateHash,peerSig>, where
-          - 'blockno' is the current blocknumber
-          - 'blocknohash' is its respective hash
-          - 'stateHash' is the hash of the latest state (produced by e.g., a Merkle hash) upon
-              validation of block blockno and peerSig is peer’s signature on
-              (CHECKPOINT,blocknohash,blockno,stateHash), referring to the validated ledger.
 
-      A peer collects CHECKPOINT messages until it obtains enough correctly signed messages with
-      matching blockno, blocknohash and stateHash to establish a valid checkpoint.
 
-      Upon establishing a valid checkpoint for block number blockno with blocknohash, a peer:
-        - if blockno>latestValidCheckpoint.blockno, then a peer assigns
-            latestValidCheckpoint=(blocknohash,blockno),
-        - stores the set of respective peer signatures that constitute a valid checkpoint into the
-            set latestValidCheckpointProof
-        - stores the state corresponding to stateHash to latestValidCheckpointedState,
-        - (optionally) prunes its PeerLedger up to block number blockno (inclusive).
 
-    4.2.2. Valid checkpoints
-      Clearly, the checkpointing protocol raises the following questions:
-        - When can a peer prune its PeerLedger?
-        - How many CHECKPOINT messages are “sufficiently many”?
 
-      This is defined by a checkpoint validity policy, with (at least) two possible approaches,
-      which may also be combined:
-        - Local (peer-specific) checkpoint validity policy (LCVP). A local policy at a given peer p
-            may specify a set of peers which peer p trusts and whose CHECKPOINT messages are
-            sufficient to establish a valid checkpoint.
-
-            For example, LCVP at peer Alice may define that Alice needs to receive CHECKPOINT
-            message from Bob, or from both Charlie and Dave.
-        - Global checkpoint validity policy (GCVP). A checkpoint validity policy may be specified
-            globally. This is similar to a local peer policy, except that it is stipulated at the
-            system (blockchain) granularity, rather than peer granularity.
-
-            For instance, GCVP may specify that:
-              - each peer may trust a checkpoint if confirmed by 11 different peers.
-              - in a specific deployment in which every orderer is collocated with a peer in the
-                  same machine (i.e., trust domain) and where up to f orderers may be (Byzantine)
-                  faulty, each peer may trust a checkpoint if confirmed by f+1 different peers
-                  collocated with orderers.
 
