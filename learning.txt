@@ -1,62 +1,89 @@
-Channel Configuration (configtxgen)
-  This document describe the usage for the configtxgen utility for manipulating Hyperledger Fabric 
-  channel configuration.
+Endorsement policies
 
-  For now, the tool is primarily focused on generating the genesis block for bootstrapping the 
-  orderer, but it is intended to be enhanced in the future for generating new channel configurations
-  as well as reconfiguring existing channels.
+  Endorsement policies are used to instruct a peer on how to decide whether a transaction is
+  properly endorsed.
 
-  Configuration Profiles
-    The configuration parameters supplied to the configtxgen tool are primarily provided by the 
-    configtx.yaml file. This file is located at fabric/sampleconfig/configtx.yaml in the fabric.git
-    repository.
+  When a peer receives a transaction, it invokes the VSCC (Validation System Chaincode) associated
+  with the transaction’s Chaincode as part of the transaction validation flow to determine the
+  validity of the transaction.
 
-    This configuration file is split primarily into three pieces.
-      - The Profiles section. By default, this section includes some sample configurations which can
-          be used for development or testing scenarios, and refer to crypto material present in the
-          fabric.git tree. These profiles can make a good starting point for construction a real 
-          deployment profile. The configtxgen tool allows you to specify the profile it is operating
-          under by passing the -profile flag. Profiles may explicitly declare all configuration, but
-          usually inherit configuration from the defaults in (3) below.
-      - The Organizations section. By default, this section includes a single reference to the 
-          sampleconfig MSP definition. For production deployments, the sample organization should be
-          removed, and the MSP definitions of the network members should be referenced and defined 
-          instead. Each element in the Organizations section should be tagged with an anchor label 
-          such as &orgName which will allow the definition to be referenced in the Profiles 
-          sections.
-      - The default sections. There are default sections for Orderer and Application configuration,
-          these include attributes like BatchTimeout and are generally used as the base inherited 
-          values for the profiles.
+  Recall that a transaction contains one or more endorsement from as many endorsing peers. VSCC is
+  tasked to make the following determinations:
+    - all endorsements are valid (i.e. they are valid signatures from valid certificates over the expected message)
+    - there is an appropriate number of endorsements
+    - endorsements come from the expected source(s)
 
-    This configuration file may be edited, or, individual properties may be overridden by setting 
-    environment variables, such as CONFIGTX_ORDERER_ORDERERTYPE=kafka. Note that the Profiles 
-    element and profile name do not need to be specified.
+  Endorsement policies are a way of specifying the second and third points.
 
-  Bootstrapping the orderer
-    After creating a configuration profile as desired, simply invoke
+  Endorsement policy design
 
-      configtxgen -profile <profile_name> -outputBlock orderer_genesisblock.pb
+    Endorsement policies have two main components:
+      - a principal
+      - a threshold gate
 
-    This will produce an orderer_genesisblock.pb file in the current directory. This genesis block 
-    is used to bootstrap the ordering system channel, which the orderers use to authorize and 
-    orchestrate creation of other channels. By default, the channel ID encoded into the genesis 
-    block by configtxgen will be testchainid. It is recommended that you modify this identifier to
-    something which will be globally unique.
+    A principal P identifies the entity whose signature is expected.
 
-    Then, to utilize this genesis block, before starting the orderer, simply specify 
-    ORDERER_GENERAL_GENESISMETHOD=file and ORDERER_GENERAL_GENESISFILE=$PWD/orderer_genesisblock.pb
-    or modify the orderer.yaml file to encode these values.
+    A threshold gate T takes two inputs: an integer t (the threshold) and a list of n principals
+    or gates; this gate essentially captures the expectation that out of those n principals or
+    gates, t are requested to be satisfied.
 
-  Creating a channel
-    The tool can also output a channel creation tx by executing
+    For example:
+      - T(2, 'A', 'B', 'C') requests a signature from any 2 principals out of ‘A’, ‘B’ or ‘C’;
+      - T(1, 'A', T(2, 'B', 'C')) requests either one signature from principal A or 1 signature from
+          B and C each.
 
-      configtxgen -profile <profile_name> -channelID <channel_name> -outputCreateChannelTx <tx_filename>
+  Endorsement policy syntax in the CLI
 
-    This will output a marshaled Envelope message which may be sent to broadcast to create a channel.
+    In the CLI, a simple language is used to express policies in terms of boolean expressions over 
+    principals.
 
-  Reviewing a configuration
-    In addition to creating configuration, the configtxgen tool is also capable of inspecting configuration.
+    A principal is described in terms of the MSP that is tasked to validate the identity of the 
+    signer and of the role that the signer has within that MSP. 
+    
+    Currently, two roles are supported: member and admin. Principals are described as MSP.ROLE, 
+    where MSP is the MSP ID that is required, and ROLE is either one of the two strings member and 
+    admin. Examples of valid principals are 'Org0.admin' (any administrator of the Org0 MSP) or 
+    'Org1.member' (any member of the Org1 MSP).
 
-    It supports inspecting both configuration blocks, and configuration transactions. You may use 
-    the inspect flags -inspectBlock and -inspectChannelCreateTx respectively with the path to a 
-    file to inspect to output a human readable (JSON) representation of the configuration.
+    The syntax of the language is:
+
+      EXPR(E[, E...])
+
+      where EXPR is either AND or OR, representing the two boolean expressions and E is either a 
+      principal (with the syntax described above) or another nested call to EXPR.
+
+    For example: 
+    - AND('Org1.member', 'Org2.member', 'Org3.member') requests 1 signature from each of the three 
+        principals 
+    - OR('Org1.member', 'Org2.member') requests 1 signature from either one of the two principals 
+    - OR('Org1.member', AND('Org2.member', 'Org3.member')) requests either one signature from a 
+        member of the Org1 MSP or 1 signature from a member of the Org2 MSP and 1 signature from a 
+        member of the Org3 MSP.
+
+  Specifying endorsement policies for a chaincode
+
+    Using this language, a chaincode deployer can request that the endorsements for a chaincode be 
+    validated against the specified policy. NOTE - the default policy requires one signature from a 
+    member of the DEFAULT MSP). This is used if a policy is not specified in the CLI.
+
+    The policy can be specified at deploy time using the -P switch, followed by the policy.
+
+    For example:
+
+      peer chaincode deploy -C testchainid -n mycc -p github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example02 -c '{"Args":["init","a","100","b","200"]}' -P "AND('Org1.member', 'Org2.member')"
+
+    This command deploys chaincode mycc on chain testchainid with the policy AND('Org1.member', 'Org2.member').
+
+  Future enhancements
+
+    In this section we list future enhancements for endorsement policies: 
+    - alongside the existing way of identifying principals by their relationship with an MSP, we 
+        plan to identify principals in terms of the Organization Unit (OU) expected in their 
+        certificates; this is useful to express policies where we request signatures from any 
+        identity displaying a valid certificate with an OU matching the one requested in the 
+        definition of the principal. 
+    - instead of the syntax AND(., .) we plan to move to a more intuitive syntax . AND .
+    - we plan to expose generalized threshold gates in the language as well alongside AND 
+        (which is the special n-out-of-n gate) and OR (which is the special 1-out-of-n gate)
+
+
